@@ -8,6 +8,7 @@
 A full-stack logistics dashboard that plans delivery routes for a fleet with a **MAX-MIN Ant Colony Optimization** solver (Python), stores every plan (Node/Express + MongoDB) and animates it on a live map (React + OpenLayers).
 
 ![Dashboard: trucks driving their optimized routes](docs/dashboard-in-motion.png)
+![Dashboard after all deliveries are complete](docs/dashboard-complete.png)
 
 <sub>Screenshot taken offline, so the OpenStreetMap basemap is blank; with internet the map tiles load behind the routes.</sub>
 
