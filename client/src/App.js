@@ -1,104 +1,122 @@
-import axios from "axios"
-import { useState } from "react"
-import Dashboard from "./components/Dashboard"
+import { useCallback, useEffect, useRef, useState } from "react"
+import api, { clearToken, errorMessage, getToken, setToken } from "./api"
+import ControlPanel from "./components/ControlPanel"
+import DeliveryLog from "./components/DeliveryLog"
+import MapView from "./components/MapView"
+import StatsPanel from "./components/StatsPanel"
+import { DEPOT, SAMPLE_STOPS } from "./utils/sample"
+import "./App.css"
 
 function App() {
-
-  const [result, setResult] = useState(null)
-  const [nonOptimizedResult, setNonOptimizedResult] = useState(null)
+  const [locations, setLocations] = useState([DEPOT])
   const [vehicles, setVehicles] = useState(2)
-  const [locations, setLocations] = useState([
-    { name: "Depot", x: 77.6, y: 12.9, demand: 0, status: "depot" }
-  ])
+  const [capacity, setCapacity] = useState(100)
+  const [result, setResult] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [pickMode, setPickMode] = useState(false)
+  const [fitSignal, setFitSignal] = useState(0)
+  const [metrics, setMetrics] = useState({})
+  const [history, setHistory] = useState([])
+  const [toast, setToast] = useState(null)
+  const routeIdRef = useRef(null)
 
-  const generateNonOptimized = () => {
-  if (locations.length <= 1) return null
+  const notify = useCallback((message, type = "error") => setToast({ message, type, id: Date.now() }), [])
+  useEffect(() => {
+    if (!toast) return undefined
+    const t = setTimeout(() => setToast(null), 4500)
+    return () => clearTimeout(t)
+  }, [toast])
 
-  const route = locations.map((_, i) => i)
-  route.push(0)
+  const refresh = useCallback(() => {
+    api.get("/routes", { params: { limit: 20 } }).then(r => setHistory(r.data)).catch(() => setHistory([]))
+    api.get("/metrics").then(r => setMetrics(r.data)).catch(() => setMetrics({}))
+  }, [])
+  useEffect(refresh, [refresh])
 
-  let totalDistance = 0
-  for (let i = 0; i < route.length - 1; i++) {
-    const a = locations[route[i]]
-    const b = locations[route[i + 1]]
+  // Any edit invalidates the current plan (route indexes would point at the wrong stops).
+  const invalidate = () => { setResult(null); routeIdRef.current = null }
 
-    const dx = a.x - b.x
-    const dy = a.y - b.y
-    totalDistance += Math.sqrt(dx * dx + dy * dy) * 111
+  const addLocation = loc => {
+    invalidate()
+    setLocations(prev => [...prev, {
+      name: loc.name || `Stop ${prev.length}`,
+      x: Number(loc.x), y: Number(loc.y),
+      demand: loc.demand ?? 10, // ?? so a demand of 0 is respected
+      status: "pending",
+    }])
   }
-
-  const avgSpeed = 40
-  const eta = totalDistance / avgSpeed
-
-  return {
-    routes: [route],
-    distance_km: Number(totalDistance.toFixed(2)),
-    eta_hours: Number(eta.toFixed(2))
-  }
-}
-
-  const addLocation = (loc) => {
-    setLocations(prev => [
-      ...prev,
-      {
-        name: loc.name || `Stop ${prev.length}`,
-        x: Number(loc.x),
-        y: Number(loc.y),
-        demand: Number(loc.demand || 10),
-        status: "pending"
-      }
-    ])
-  }
-
-  const deleteLocation = (index) => {
-    setLocations(prev => prev.filter((_, i) => i !== index))
-  }
+  const deleteLocation = index => { invalidate(); setLocations(prev => prev.filter((_, i) => i !== index)) }
+  const loadSample = () => { invalidate(); setLocations([DEPOT, ...SAMPLE_STOPS]); setFitSignal(s => s + 1) }
 
   const optimize = async () => {
+    if (locations.length < 2) return notify("Add at least one stop first, or load the sample data.")
+    setLoading(true)
     try {
-
-      setLocations(prev =>
-      prev.map(loc =>
-        loc.status === "depot"
-          ? loc
-          : { ...loc, status: "pending" }
-      )
-    )
-
-    const baseline = generateNonOptimized()
-    setNonOptimizedResult(baseline)
-    const res = await axios.post("http://localhost:4000/optimize", {
-      vehicles,
-      locations
-    })
-      setResult(res.data)
+      const { data } = await api.post("/optimize", { vehicles, capacity, locations })
+      routeIdRef.current = data.routeId
+      setLocations(prev => prev.map((l, i) => l.status === "depot" ? l : { ...l, status: data.unserved?.includes(i) ? "unserved" : "pending" }))
+      setResult(data)
+      setFitSignal(s => s + 1)
+      if (data.unserved?.length) notify(`${data.unserved.length} stop(s) exceed fleet capacity.`, "warn")
+      refresh()
     } catch (e) {
-      console.error("Optimization failed", e)
-      alert("Optimization failed. Check backend server.")
+      notify(errorMessage(e, "Optimization failed"))
+    } finally {
+      setLoading(false)
     }
   }
 
+  const onStopDelivered = useCallback(index => {
+    setLocations(prev => prev.map((l, i) => (i === index && l.status === "pending" ? { ...l, status: "delivered" } : l)))
+    if (routeIdRef.current) {
+      api.patch(`/routes/${routeIdRef.current}/stops/${index}`, { status: "delivered" })
+        .then(() => setTimeout(refresh, 300))
+        .catch(() => {})
+    }
+  }, [refresh])
+
+  // Clearing history needs the admin password; the token is kept for this browser session only.
+  const adminToken = async () => {
+    const existing = getToken()
+    if (existing) return existing
+    const password = window.prompt("Admin password (required to clear history):")
+    if (password === null) return null
+    const { data } = await api.post("/auth/login", { password })
+    setToken(data.token)
+    return data.token
+  }
+
   const clearHistory = async () => {
+    if (!window.confirm("Delete all saved route history?")) return
     try {
-      await axios.delete("http://localhost:4000/routes")
-      setResult(null)
+      const token = await adminToken()
+      if (!token) return
+      await api.delete("/routes", { headers: { Authorization: `Bearer ${token}` } })
+      refresh()
+      notify("History cleared", "ok")
     } catch (e) {
-      console.error("Clear history failed", e)
+      if (e?.response?.status === 401) clearToken() // expired or wrong: ask again next time
+      notify(errorMessage(e, "Could not clear history"))
     }
   }
 
   return (
-    <Dashboard
-      result={result}
-      locations={locations}
-      setLocations={setLocations}
-      addLocation={addLocation}
-      deleteLocation={deleteLocation}
-      optimize={optimize}
-      nonOptimized={nonOptimizedResult}
-      setVehicles={setVehicles}
-      clearHistory={clearHistory}
-    />
+    <div className="app">
+      <ControlPanel
+        vehicles={vehicles} setVehicles={setVehicles} capacity={capacity} setCapacity={setCapacity}
+        addLocation={addLocation} onError={notify} pickMode={pickMode} setPickMode={setPickMode}
+        loadSample={loadSample} optimize={optimize} clearHistory={clearHistory} loading={loading}
+      />
+      <main className="main">
+        <MapView
+          locations={locations} result={result} pickMode={pickMode} fitSignal={fitSignal}
+          onMapClick={addLocation} onStopDelivered={onStopDelivered}
+        />
+        <DeliveryLog locations={locations} />
+      </main>
+      <StatsPanel result={result} locations={locations} metrics={metrics} history={history} deleteLocation={deleteLocation} />
+      {toast && <div key={toast.id} className={`toast toast-${toast.type}`} role="status">{toast.message}</div>}
+    </div>
   )
 }
 

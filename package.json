@@ -1,0 +1,9 @@
+{
+  "name": "fleet-optimization",
+  "private": true,
+  "scripts": {
+    "install:all": "npm --prefix server install && npm --prefix client install && pip install -r optimizer/requirements.txt",
+    "dev": "npx concurrently -n optimizer,server,client -c yellow,cyan,green \"python optimizer/app.py\" \"npm --prefix server run dev\" \"npm --prefix client start\"",
+    "test": "npm --prefix server test && npm --prefix client test -- --watchAll=false && python -m pytest optimizer -q"
+  }
+}

@@ -1,61 +1,35 @@
-const express = require("express")
-const cors = require("cors")
-const mongoose = require("mongoose")
 const axios = require("axios")
+const mongoose = require("mongoose")
 
-const Vehicle = require("./models/Vehicle")
-const Driver = require("./models/Driver")
-const Route = require("./models/Route")
+const config = require("./config")
+const { createMemoryRoute } = require("./memoryRoute")
+const auth = require("./auth")
+const { createApp } = require("./app")
 
-const app = express()
-app.use(cors())
-app.use(express.json())
+const optimizer = {
+  solve: async body => (await axios.post(`${config.optimizerUrl}/optimize`, body, { timeout: config.optimizerTimeoutMs })).data,
+}
 
-mongoose.connect("mongodb://127.0.0.1:27017/fleetDB")
-  .then(()=>console.log("MongoDB Connected"))
-  .catch(err=>console.log(err))
-
-// CRUD routes
-app.get("/routes", async (req,res)=>{ 
-  const routes = await Route.find().sort({createdAt:-1})
-  res.json(routes)
-})
-app.delete("/routes", async (req,res)=>{
-  await Route.deleteMany({})
-  res.json({message:"History cleared"})
-})
-app.get("/metrics", async (req,res)=>{
-  const routes = await Route.find()
-  let totalRoutes = routes.length, totalDeliveries = 0, delivered = 0, totalETA = 0, totalDistance = 0
-  routes.forEach(r=>{
-    totalETA += r.eta ?? 0
-    totalDistance += r.totalDistance ?? 0
-    r.locations.forEach(loc=>{ totalDeliveries++; if(loc.status==="delivered") delivered++ })
-  })
-  res.json({
-    totalRoutes,
-    totalDeliveries,
-    successRate: totalDeliveries? (delivered/totalDeliveries)*100 :0,
-    avgETA: totalRoutes? totalETA/totalRoutes :0,
-    avgDistance: totalRoutes? totalDistance/totalRoutes :0
-  })
-})
-
-// Optimize route via Flask
-app.post("/optimize", async (req,res)=>{
-  try{
-    const response = await axios.post("http://localhost:5000/optimize", req.body)
-    const saved = await Route.create({
-      routes: response.data.routes,
-      totalDistance: response.data.distance_km,
-      eta: response.data.eta_hours,
-      locations: req.body.locations
-    })
-    res.json(response.data)
-  } catch(e){
-    console.error(e)
-    res.status(500).send("Optimization failed")
+async function main() {
+  let Route
+  if (config.useMemoryDb) {
+    Route = createMemoryRoute()
+    console.log("Using IN-MEMORY storage (USE_MEMORY_DB=true). Data is lost on restart.")
+  } else {
+    await mongoose.connect(config.mongoUri, { serverSelectionTimeoutMS: 5000 })
+    Route = require("./models/Route")
+    console.log("MongoDB connected")
   }
-})
 
-app.listen(4000, ()=>console.log("Server running on port 4000"))
+  const app = createApp({ Route, optimizer, auth, clientOrigins: config.clientOrigins })
+  const server = app.listen(config.port, () => console.log(`API listening on http://localhost:${config.port}`))
+
+  const shutdown = () => server.close(() => Promise.resolve(config.useMemoryDb || mongoose.disconnect()).then(() => process.exit(0)))
+  process.on("SIGINT", shutdown)
+  process.on("SIGTERM", shutdown)
+}
+
+main().catch(err => {
+  console.error("Failed to start:", err.message)
+  process.exit(1)
+})
