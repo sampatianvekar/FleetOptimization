@@ -1,28 +1,40 @@
 const mongoose = require("mongoose")
 
-const RouteSchema = new mongoose.Schema({
+const STATUSES = ["depot", "pending", "in-transit", "delivered", "unserved"]
 
-routes: Array,
+const LocationSchema = new mongoose.Schema(
+  {
+    name: { type: String, trim: true, maxlength: 80 },
+    x: { type: Number, required: true },
+    y: { type: Number, required: true },
+    demand: { type: Number, default: 0, min: 0 },
+    status: { type: String, enum: STATUSES, default: "pending" },
+  },
+  { _id: false }
+)
 
-totalDistance: Number,
+const RouteStatSchema = new mongoose.Schema(
+  { vehicle: Number, stops: Number, load: Number, capacity: Number, distance_km: Number, eta_minutes: Number },
+  { _id: false }
+)
 
-eta: Number,
+const RouteSchema = new mongoose.Schema(
+  {
+    routes: [[Number]],               // one array of location indexes per vehicle
+    totalDistance: Number,            // km
+    eta: Number,                      // hours (kept for backwards compatibility)
+    baselineDistance: Number,         // km for the naive plan on the same problem
+    baselineEta: Number,
+    vehicles: Number,
+    capacity: Number,
+    unserved: [Number],
+    routeStats: [RouteStatSchema],
+    locations: [LocationSchema],
+  },
+  { timestamps: true }
+)
 
-locations: [
-{
-name:String,
-x:Number,
-y:Number,
-demand:Number,
-status:String
-}
-],
+RouteSchema.index({ createdAt: -1 })
 
-createdAt:{
-type:Date,
-default:Date.now
-}
-
-},{ timestamps: true })
-
-module.exports = mongoose.model("Route",RouteSchema)
+module.exports = mongoose.model("Route", RouteSchema)
+module.exports.STATUSES = STATUSES
